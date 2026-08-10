@@ -61,6 +61,7 @@ count, find
 
 Rules:
 - Understand synonyms and different wording.
+- try to understand the user's intent and map it to the most relevant collection and fields.find multiple collections and fields if needed and answer in text based on response json
 - Do not reject a database-related question because of its wording.
 - Never invent collections or fields.
 - If the exact field is unclear, use important keywords to search the
