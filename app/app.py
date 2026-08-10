@@ -25,7 +25,7 @@ async def index(request: Request):
         "subtitle": "Ask a question and get results from the database",
         "placeholder": "e.g., count the number of movies",
         "db_name": os.getenv("MONGO_DB_NAME", "sample_mflix"),
-        "llm_model": os.getenv("LLM_MODEL", "local-model"),
+        "llm_model": os.getenv("LLM_MODEL", "llama-3.1-70b-versatile"),
         "collections": [
             "movies",
             "users",
@@ -36,13 +36,12 @@ async def index(request: Request):
     }
 
     return templates.TemplateResponse(
-        request = request,
-        name="index.html",
+        "index.html",
         {
+            "request": request,
             **config
         }
     )
-
 
 @app.post("/api/query")
 async def api_query(data: QueryRequest):
