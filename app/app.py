@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from .main import query_db
+from pathlib import Path
 import os
 from dotenv import load_dotenv
 
@@ -10,7 +11,8 @@ load_dotenv()
 
 app = FastAPI(title="text2db")
 
-templates = Jinja2Templates(directory="app/templates")
+BASE_DIR = Path(__file__).resolve().parent
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
 class QueryRequest(BaseModel):
@@ -25,7 +27,7 @@ async def index(request: Request):
         "subtitle": "Ask a question and get results from the database",
         "placeholder": "e.g., count the number of movies",
         "db_name": os.getenv("MONGO_DB_NAME", "sample_mflix"),
-        "llm_model": os.getenv("LLM_MODEL", "llama-3.1-70b-versatile"),
+        "llm_model": os.getenv("LLM_MODEL", "local-model"),
         "collections": [
             "movies",
             "users",
