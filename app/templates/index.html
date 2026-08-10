@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ title }}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            max-width: 1200px;
+            width: 100%;
+        }
+        h1 { 
+            color: #333; 
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        .info-bar {
+            background: #f9f9f9;
+            padding: 10px 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-size: 12px;
+            color: #666;
+            border-left: 3px solid #667eea;
+        }
+        .db-info {
+            background: linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%);
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 25px;
+            border-left: 4px solid #667eea;
+        }
+        .db-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 15px;
+        }
+        .collections-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 12px;
+            margin-bottom: 15px;
+        }
+        .collection-card {
+            background: white;
+            padding: 12px 15px;
+            border-radius: 6px;
+            border-left: 3px solid #667eea;
+            font-size: 13px;
+        }
+        .collection-name {
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+        .collection-desc {
+            color: #666;
+            font-size: 12px;
+        }
+        .example-queries {
+            background: white;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+        }
+        .example-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .example-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 8px;
+        }
+        .example-item {
+            background: #f5f5f5;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #555;
+            cursor: pointer;
+            transition: all 0.2s;
+            border-left: 2px solid transparent;
+        }
+        .example-item:hover {
+            background: #efefef;
+            border-left-color: #667eea;
+        }
+        .input-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        input { 
+            flex: 1;
+            padding: 12px 15px;
+            font-size: 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            transition: border-color 0.3s;
+        }
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        button { 
+            padding: 12px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+        button:hover { 
+            transform: translateY(-2px);
+        }
+        button:active {
+            transform: translateY(0);
+        }
+        .result { 
+            margin-top: 30px; 
+            display: none;
+        }
+        .text { 
+            font-size: 18px; 
+            color: #333;
+            padding: 15px;
+            background: #f0f4ff;
+            border-left: 4px solid #667eea;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-weight: 600;
+        }
+        #jsonView {
+            margin-top: 20px;
+        }
+
+        #jsonView h3 {
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        #json {
+            background: #1e1e1e;
+            color: #f5f5f5;
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            font-family: "Courier New", monospace;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .error {
+            color: #dc3545;
+            padding: 15px;
+            background: #f8d7da;
+            border-left: 4px solid #dc3545;
+            border-radius: 6px;
+            margin-top: 20px;
+            display: none;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            color: #667eea;
+            font-style: italic;
+            padding: 20px;
+        }
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .count-badge {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+        .toggle-db-info {
+            background: #f5f5f5;
+            border: none;
+            padding: 8px 15px;
+            margin-top: 10px;
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #667eea;
+            font-weight: 600;
+        }
+        .toggle-db-info:hover {
+            background: #efefef;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>{{ title }}</h1>
+        <p class="subtitle">{{ subtitle }}</p>
+        
+        <div class="info-bar">
+            Database: <strong>{{ db_name }}</strong> | 
+            Model: <strong>{{ llm_model }}</strong>
+        </div>
+        
+        <!-- Database Info Section -->
+        <div class="db-info" id="dbInfo">
+            <div class="db-title">Database Collections</div>
+            <div class="collections-grid">
+                <div class="collection-card">
+                    <div class="collection-name">🎬 movies</div>
+                    <div class="collection-desc">Movie details, ratings, cast, directors, genres</div>
+                </div>
+                <div class="collection-card">
+                    <div class="collection-name">👤 users</div>
+                    <div class="collection-desc">User accounts and profiles</div>
+                </div>
+                <div class="collection-card">
+                    <div class="collection-name">💬 comments</div>
+                    <div class="collection-desc">Comments on movies with dates</div>
+                </div>
+                <div class="collection-card">
+                    <div class="collection-name">🎫 sessions</div>
+                    <div class="collection-desc">User session tokens and data</div>
+                </div>
+                <div class="collection-card">
+                    <div class="collection-name">🏢 theaters</div>
+                    <div class="collection-desc">Theater locations and addresses</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="input-group">
+            <input 
+                type="text" 
+                id="question" 
+                placeholder="{{ placeholder }}" 
+            />
+            <button onclick="askQuestion()">Search</button>
+        </div>
+        
+        <div class="loading" id="loading">
+            <span class="spinner"></span>
+            Loading...
+        </div>
+        
+        <div id="result" class="result">
+            <div class="text" id="text"></div>
+
+            <div id="jsonView">
+                <h3>JSON Result</h3>
+                <pre id="json"></pre>
+            </div>
+        </div>
+
+        <div class="error" id="error"></div>
+    </div>
+
+    <script>
+
+        async function askQuestion() {
+            const input = document.getElementById('question');
+            const question = input.value.trim();
+
+            if (!question) {
+                showError('Please enter a question');
+                return;
+            }
+
+            showLoading(true);
+            document.getElementById('result').style.display = 'none';
+            document.getElementById('error').style.display = 'none';
+
+            try {
+                const response = await fetch('/api/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question: question })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok || data.error) {
+                    throw new Error(data.error || `HTTP ${response.status}`);
+                }
+
+                displayResult(data);
+            } catch (error) {
+                showError('Error: ' + error.message);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function displayResult(data) {
+            const result = document.getElementById("result");
+            const text = document.getElementById("text");
+            const json = document.getElementById("json");
+
+            text.textContent = data.text || "No answer returned.";
+
+            json.textContent = JSON.stringify(
+                data.json || {},
+                null,
+                2
+            );
+
+            result.style.display = "block";
+        }
+
+        function showLoading(show) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+
+        document.getElementById('question').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') askQuestion();
+        });
+    </script>
+</body>
+</html>
