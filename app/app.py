@@ -36,9 +36,9 @@ async def index(request: Request):
     }
 
     return templates.TemplateResponse(
-        "index.html",
+        request = request,
+        name="index.html",
         {
-            "request": request,
             **config
         }
     )
