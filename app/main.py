@@ -1,10 +1,12 @@
-import json, os, re
+import json
+import os
+import re
+
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
-import pyodbc
+from pymongo import MongoClient
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser, StrOutputParser
+from langchain_core.output_parsers import StrOutputParser
 from langchain_classic.memory import ConversationBufferMemory
 
 load_dotenv()
@@ -12,221 +14,182 @@ load_dotenv()
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
-MONGODB_ODBC_CONNECTION_STRING = os.getenv("MONGODB_ODBC_CONNECTION_STRING")
+MONGODB_URI = os.getenv("MONGODB_URI")
+MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "sample_mflix")
+
+if not MONGODB_URI:
+    raise RuntimeError("MONGODB_URI not configured")
+
+client = MongoClient(MONGODB_URI)
+db = client[MONGODB_DATABASE]
+
 model = ChatOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY, model=LLM_MODEL, temperature=0)
 
 SCHEMA = {
-    "movies": {
-        "_id": "objectId",
-        "title": "string",
-        "plot": "string",
-        "genres": "array[string]",
-        "cast": "array[string]",
-        "directors": "array[string]",
-        "year": "integer",
-        "rated": "string",
-        "runtime": "integer",
-        "imdb.rating": "number",
-        "imdb.votes": "integer",
-        "languages": "array[string]",
-        "countries": "array[string]",
-        "released": "date",
-        "type": "string"
-    },
-    "comments": {
-        "_id": "objectId",
-        "name": "string",
-        "email": "string",
-        "movie_id": "objectId",
-        "text": "string",
-        "date": "timestamp"
-    },
-    "sessions": {
-        "_id": "objectId",
-        "user_id": "string",
-        "jwt": "string"
-    },
-    "users": {
-        "_id": "objectId",
-        "name": "string",
-        "email": "string",
-        "password": "string"
-    }
+    "movies": ["_id", "title", "plot", "genres", "cast", "directors", "year", "rated",
+               "runtime", "imdb.rating", "imdb.votes", "languages", "countries", "released", "type"],
+    "comments": ["_id", "name", "email", "movie_id", "text", "date"],
+    "sessions": ["_id", "user_id", "jwt"],
+    "users": ["_id", "name", "email", "password"],
+    "theaters": ["_id", "theaterId", "location"],
 }
 
+schema = json.dumps(SCHEMA, indent=2)
 memory = ConversationBufferMemory(memory_key="history", return_messages=False)
-
-class SQLQuery(BaseModel):
-    query: str = Field(description="A read-only SQL SELECT query")
-
-sql_parser = PydanticOutputParser(pydantic_object=SQLQuery)
-
-rewrite_chain = (
+# Natural language → MongoDB query (the ONLY LLM call per question)
+query_chain = (
     PromptTemplate.from_template(
-        """You are a database question rewriting assistant.
-Rewrite the user's question for SQL conversion:
-- Do NOT answer or create SQL
-- Do NOT invent information
-- Keep original meaning
-- Use table/field names when possible
-- Resolve references from history
+        """Convert the question into ONE MongoDB query, using conversation history for follow-ups.
 
-Schema: {schema}
-History: {history}
-Question: {question}
-
-Return ONLY the rewritten question."""
-    )
-    | model
-    | StrOutputParser()
-)
-
-sql_chain = (
-    PromptTemplate.from_template(
-        """You are an SQL query generator for MongoDB SQL Interface.
-
-Convert the question into a READ-ONLY SQL query.
-
-Tables & fields:
+Schema (only these collections and fields):
 {schema}
 
+Conversation history:
+{history}
+
+Question:
+{question}
+
+Output ONLY JSON:
+- DB question: {{"status":"query","collection":"<c>","operation":"find"|"count","filter":{{}},"sort":{{}},"limit":10}}
+- Clearly unrelated: {{"status":"unrelated"}}
+
 Rules:
-1. ONLY SELECT statements
-2. Forbidden: INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, TRUNCATE, GRANT, REVOKE
-3. "count/how many" = COUNT(*)
-4. Use WHERE for filtering
-5. Use ORDER BY for sorting
-6. Use LIMIT 10 for normal requests
-7. Use ARRAY_CONTAINS for array fields (cast, genres, directors, languages, countries)
-8. Use LIKE '%text%' for text search
-9. Never invent tables or fields
-10. Return ONLY the SQL query
+- Status: ONLY {{"status":"query"}} or {{"status":"unrelated"}}; exactly one JSON object, nothing else.
+- NEVER unrelated for movie/film/title/actor/cast/director/genre/rating/rated/year/count/user/comment/session/theater/highest/lowest/best/worst/top rated/show/list/find/tell me about, or any follow-up to a prior DB question. Unrelated only for clearly unrelated topics (weather, politics, general knowledge).
+- Collections: movies, users, comments, sessions, theaters. Operations: find or count. Only schema fields. Rating words → imdb.rating; actors → cast; directors → directors.
+- Arrays (genres, cast, directors, languages, countries) use {{"$in":["value"]}}.
+- Title lookup: naming a specific movie → {{"filter":{{"title":{{"$regex":"^<title>$","$options":"i"}}}},"sort":{{}},"limit":1}}.
+- Highest/best/top rated → {{"filter":{{"imdb.rating":{{"$type":"double"}}}},"sort":{{"imdb.rating":-1}},"limit":1}}. Lowest/worst → {{"filter":{{"imdb.rating":{{"$type":"double"}}}},"sort":{{"imdb.rating":1}},"limit":1}}. The {{"$type":"double"}} filter is REQUIRED for rating lookups; never use an empty filter.
+- count: empty filter unless needed, no sort/limit. find: limit 10 default. Years: {{"year":<number>}}.
+- Fix obvious typos ("moviee"→"movie") before deciding unrelated. Follow-ups: use ONLY the MOST RECENT previous query from history (the last "Query:" line); never merge or combine earlier queries. Generate a NEW query changing only what the current question asks (e.g. "What about 1991?" → replace year with 1991; "Which one has the highest rating?" → keep the most recent filter, add sort {{"imdb.rating":-1}}, limit 1; "What about horror movies?" → change filter to {{"genres":{{"$in":["horror"]}}}}).
 
 Examples:
-Q: How many movies are there?
-A: SELECT COUNT(*) AS movie_count FROM movies;
-
-Q: Movies with Tom Hanks?
-A: SELECT * FROM movies WHERE ARRAY_CONTAINS(cast, 'Tom Hanks') LIMIT 10;
-
-Q: Horror movies from 2020?
-A: SELECT * FROM movies WHERE ARRAY_CONTAINS(genres, 'Horror') AND year = 2020 LIMIT 10;
-
-{format_instructions}
-
-Question: {rewritten_question}"""
-    ).partial(format_instructions=sql_parser.get_format_instructions())
-    | model
-    | sql_parser
-)
-
-answer_chain = (
-    PromptTemplate.from_template(
-        """Answer the user's question using ONLY the database result.
-
-Original: {question}
-Rewritten: {rewritten_question}
-SQL: {sql_query}
-Result: {database_data}
-
-Rules:
-- No invented information
-- Use only the result
-- If empty, say no data found
-- Be concise
-- No implementation details"""
+How many movies are there? → {{"status":"query","collection":"movies","operation":"count","filter":{{}}}}
+Show me movies from 1990 → {{"status":"query","collection":"movies","operation":"find","filter":{{"year":1990}},"limit":10}}
+What about 1991? → {{"status":"query","collection":"movies","operation":"find","filter":{{"year":1991}},"limit":10}}
+Which one has the highest rating? (previous filter year 1992) → {{"status":"query","collection":"movies","operation":"find","filter":{{"year":1992}},"sort":{{"imdb.rating":-1}},"limit":1}}
+What is the highest rated movie? → {{"status":"query","collection":"movies","operation":"find","filter":{{"imdb.rating":{{"$type":"double"}}}},"sort":{{"imdb.rating":-1}},"limit":1}}
+What is the lowest rated movie? → {{"status":"query","collection":"movies","operation":"find","filter":{{"imdb.rating":{{"$type":"double"}}}},"sort":{{"imdb.rating":1}},"limit":1}}
+Tell me about Larks on a String → {{"status":"query","collection":"movies","operation":"find","filter":{{"title":{{"$regex":"^Larks on a String$","$options":"i"}}}},"sort":{{}},"limit":1}}
+Who directed Larks on a String? → {{"status":"query","collection":"movies","operation":"find","filter":{{"title":{{"$regex":"^Larks on a String$","$options":"i"}}}},"sort":{{}},"limit":1}}
+What is the capital of France? → {{"status":"unrelated"}}
+"""
     )
-    | model
+    | model.bind(response_format={"type": "json_object"})
     | StrOutputParser()
 )
 
-def get_sql_connection():
-    if not MONGODB_ODBC_CONNECTION_STRING:
-        raise RuntimeError("MONGODB_ODBC_CONNECTION_STRING not configured")
-    return pyodbc.connect(MONGODB_ODBC_CONNECTION_STRING)
+def error(text, type_, **extra):
+    return {"text": text, "json": {"status": "error", "type": type_, **extra}}
+def clean_json(content):
+    content = re.sub(r"```(?:json)?|```", "", content, flags=re.IGNORECASE).strip()
+    for m in re.finditer(r"\{", content):
+        try:
+            return json.JSONDecoder().raw_decode(content[m.start():])[0]
+        except json.JSONDecodeError:
+            continue
+    raise ValueError("Invalid JSON from LLM")
 
-def validate_sql(query: str) -> str:
-    query = query.strip()
-    query = re.sub(r"```(?:sql)?", "", query, flags=re.IGNORECASE).replace("```", "").strip()
-    query = query.rstrip(";").strip()
-    
-    if not re.match(r"^SELECT\b", query, flags=re.IGNORECASE):
-        raise ValueError("Only SELECT queries allowed")
-    
-    for keyword in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "GRANT", "REVOKE"]:
-        if re.search(rf"\b{keyword}\b", query, flags=re.IGNORECASE):
-            raise ValueError(f"Forbidden operation: {keyword}")
-    
-    return query
 
-def execute_sql(query: str):
-    connection, cursor = None, None
-    try:
-        connection = get_sql_connection()
-        cursor = connection.cursor()
-        cursor.execute(query)
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        if cursor:
-            cursor.close()
-        if connection:
-            connection.close()
+def validate_query(q):
+    if q.get("status") == "unrelated":
+        return
+    if q.get("status") != "query":
+        raise ValueError("Invalid query status")
+
+    collection = q.get("collection")
+    operation = q.get("operation")
+    filter_ = q.get("filter", {})
+
+    if collection not in SCHEMA:
+        raise ValueError("Invalid collection")
+    if operation not in {"find", "count"}:
+        raise ValueError("Invalid operation")
+    if not isinstance(filter_, dict):
+        raise ValueError("Invalid filter")
+
+    forbidden = {"$where", "$function", "$accumulator"}
+
+    def check_filter(value):
+        if isinstance(value, dict):
+            for key, val in value.items():
+                if key in forbidden:
+                    raise ValueError(f"Forbidden operator: {key}")
+                check_filter(val)
+        elif isinstance(value, list):
+            for item in value:
+                check_filter(item)
+
+    check_filter(filter_)
+
+
+def describe(collection, docs, sort):
+    if not docs:
+        return f"No matching {collection} found."
+    if sort.get("imdb.rating") in (-1, 1):
+        return f"The {'highest' if sort['imdb.rating'] == -1 else 'lowest'} rated movie is {docs[0].get('title')} with an IMDb rating of {docs[0].get('imdb', {}).get('rating')}."
+    key = {"users": "email", "comments": "name", "sessions": "user_id", "theaters": "theaterId"}.get(collection)
+    if collection == "movies" and len(docs) == 1:
+        d = docs[0]
+        bits = [str(d["year"])] if d.get("year") else []
+        if d.get("genres"): bits.append("Genres: " + ", ".join(d["genres"]))
+        if d.get("directors"): bits.append("Directed by " + ", ".join(d["directors"]))
+        if d.get("runtime"): bits.append(f"Runtime: {d['runtime']} min")
+        if d.get("imdb", {}).get("rating"): bits.append(f"IMDb rating: {d['imdb']['rating']}")
+        s = f"{d.get('title', '?')} ({'; '.join(bits)})" if bits else str(d.get("title", "?"))
+        if d.get("plot"): s += f"\n{d['plot']}"
+        return s
+    return f"Here are {len(docs)} {collection}:\n" + "\n".join(f"{i}. {d.get('title', '?') if collection == 'movies' else (d.get(key) or d.get('name') or d.get('title') or d.get('text') or '?')}" for i, d in enumerate(docs[:10], 1))
+
 
 def query_db(question: str):
     history = memory.load_memory_variables({}).get("history", "")
-    
+
+    # ONE LLM call: natural language → MongoDB query
     try:
-        rewritten = rewrite_chain.invoke({
-            "question": question,
-            "history": history,
-            "schema": json.dumps(SCHEMA, indent=2)
-        }).strip()
+        content = query_chain.invoke({"question": question, "history": history, "schema": schema})
+        query = clean_json(content)
+        validate_query(query)
+        print("QUESTION:", question); print("HISTORY:", history); print("GENERATED QUERY:", query)
     except Exception as e:
-        return {"text": "Failed to rewrite question", "json": {"status": "error", "type": "rewrite_error", "error": str(e)}}
-    
+        return error("Failed to generate a valid database query", "query_error", error=str(e))
+    # Irrelevant question
+    if query.get("status") == "unrelated":
+        result = {"text": "This question is not related to the available database.",
+                  "json": {"status": "unanswered", "type": "irrelevant_question"}}
+        memory.save_context({"input": question}, {"output": result["text"]})
+        return result
+    collection = query["collection"]
+    operation = query["operation"]
+    filter_, sort = query.get("filter", {}), query.get("sort", {})
+
+    # Execute MongoDB query
     try:
-        sql_query = sql_chain.invoke({
-            "rewritten_question": rewritten,
-            "schema": json.dumps(SCHEMA, indent=2)
-        }).query
+        if operation == "count":
+            count = db[collection].count_documents(filter_)
+            result = {
+                "text": f"There are {count:,} {collection}.",
+                "json": {"status": "success", "type": "count", "collection": collection,
+                         "filter": filter_, "result": count, "count": count},
+            }
+        else:
+            limit = query.get("limit", 1 if sort else 10)
+            cursor = db[collection].find(filter_, {"_id": 0, "password": 0})
+            if sort:
+                cursor = cursor.sort(list(sort.items()))
+            docs = list(cursor.limit(limit))
+            result = {
+                "text": describe(collection, docs, sort),
+                "json": {"status": "success", "type": "find", "collection": collection,
+                         "filter": filter_, "result": docs, "count": len(docs)},
+            }
     except Exception as e:
-        return {"text": "Failed to generate SQL", "json": {"status": "error", "type": "sql_generation_error", "error": str(e)}}
-    
-    try:
-        sql_query = validate_sql(sql_query)
-    except Exception as e:
-        return {"text": "SQL query not allowed", "json": {"status": "error", "type": "invalid_sql", "sql_query": sql_query, "error": str(e)}}
-    
-    try:
-        result = execute_sql(sql_query)
-    except Exception as e:
-        return {"text": "Database query failed", "json": {"status": "error", "type": "database_error", "sql_query": sql_query, "error": str(e)}}
-    
-    try:
-        answer = answer_chain.invoke({
-            "question": question,
-            "rewritten_question": rewritten,
-            "sql_query": sql_query,
-            "database_data": json.dumps(result, indent=2, default=str)
-        }).strip()
-    except Exception:
-        answer = "No matching data found" if not result else f"Found {len(result)} result(s)"
-    
-    memory.save_context({"input": question}, {"output": answer})
-    
-    return {
-        "text": answer,
-        "json": {
-            "status": "success",
-            "type": "sql",
-            "original_question": question,
-            "rewritten_question": rewritten,
-            "sql_query": sql_query,
-            "result": result,
-            "count": len(result)
-        }
-    }
+        return error("Database query failed", "database_error", error=str(e))
+
+    memory.save_context({"input": question}, {"output": f"{result['text']}\nQuery: {json.dumps(query)}"})
+    return result
+
 
 if __name__ == "__main__":
     while True:
