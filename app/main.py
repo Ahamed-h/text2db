@@ -1,260 +1,236 @@
-import json
-import os
-import re
-
+import json, os, re
 from dotenv import load_dotenv
-from openai import OpenAI
-from .mongodb import db
+from pydantic import BaseModel, Field
+import pyodbc
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser, StrOutputParser
+from langchain_classic.memory import ConversationBufferMemory
 
 load_dotenv()
 
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://127.0.0.1:8000/v1")
-LLM_API_KEY = os.getenv("LLM_API_KEY", "not-needed")
-LLM_MODEL = os.getenv("LLM_MODEL", "local-model")
-
-llm = OpenAI(
-    base_url=LLM_BASE_URL,
-    api_key=LLM_API_KEY
-)
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+MONGODB_ODBC_CONNECTION_STRING = os.getenv("MONGODB_ODBC_CONNECTION_STRING")
+model = ChatOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY, model=LLM_MODEL, temperature=0)
 
 SCHEMA = {
     "movies": {
+        "_id": "objectId",
         "title": "string",
         "plot": "string",
         "genres": "array[string]",
         "cast": "array[string]",
+        "directors": "array[string]",
         "year": "integer",
         "rated": "string",
-        "imdb.rating": "number"
-    },
-    "users": {
-        "name": "string",
-        "email": "string"
+        "runtime": "integer",
+        "imdb.rating": "number",
+        "imdb.votes": "integer",
+        "languages": "array[string]",
+        "countries": "array[string]",
+        "released": "date",
+        "type": "string"
     },
     "comments": {
+        "_id": "objectId",
         "name": "string",
         "email": "string",
+        "movie_id": "objectId",
         "text": "string",
-        "date": "date"
+        "date": "timestamp"
     },
     "sessions": {
-        "user_id": "string"
+        "_id": "objectId",
+        "user_id": "string",
+        "jwt": "string"
     },
-    "theaters": {
-        "theaterId": "integer",
-        "location.address.city": "string"
+    "users": {
+        "_id": "objectId",
+        "name": "string",
+        "email": "string",
+        "password": "string"
     }
 }
 
+memory = ConversationBufferMemory(memory_key="history", return_messages=False)
 
-def query_db(question):
+class SQLQuery(BaseModel):
+    query: str = Field(description="A read-only SQL SELECT query")
 
-    prompt = f"""Return ONLY a valid JSON object.
+sql_parser = PydanticOutputParser(pydantic_object=SQLQuery)
 
-Convert the user's natural-language question into a MongoDB query.
+rewrite_chain = (
+    PromptTemplate.from_template(
+        """You are a database question rewriting assistant.
+Rewrite the user's question for SQL conversion:
+- Do NOT answer or create SQL
+- Do NOT invent information
+- Keep original meaning
+- Use table/field names when possible
+- Resolve references from history
 
-Available collections and fields:
-{json.dumps(SCHEMA, indent=2)}
+Schema: {schema}
+History: {history}
+Question: {question}
 
-Allowed operations:
-count, find
+Return ONLY the rewritten question."""
+    )
+    | model
+    | StrOutputParser()
+)
+
+sql_chain = (
+    PromptTemplate.from_template(
+        """You are an SQL query generator for MongoDB SQL Interface.
+
+Convert the question into a READ-ONLY SQL query.
+
+Tables & fields:
+{schema}
 
 Rules:
-- Understand synonyms and different wording.
-- try to understand the user's intent and map it to the most relevant collection and fields.find multiple collections and fields if needed and answer in text based on response json
-- Do not reject a database-related question because of its wording.
-- Never invent collections or fields.
-- If the exact field is unclear, use important keywords to search the
-  most relevant available text field.
-- Use case-insensitive regex for text searches.
-- "how many", "count", "number of" → count.
-- Other information requests → find.
-- A query returning zero documents is still a valid answer.
-- Only consider a question irrelevant if it has no connection to the database.
-- Return ONLY JSON.
-- Use double quotes.
-- Never use single quotes or markdown.
+1. ONLY SELECT statements
+2. Forbidden: INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, TRUNCATE, GRANT, REVOKE
+3. "count/how many" = COUNT(*)
+4. Use WHERE for filtering
+5. Use ORDER BY for sorting
+6. Use LIMIT 10 for normal requests
+7. Use ARRAY_CONTAINS for array fields (cast, genres, directors, languages, countries)
+8. Use LIKE '%text%' for text search
+9. Never invent tables or fields
+10. Return ONLY the SQL query
 
 Examples:
+Q: How many movies are there?
+A: SELECT COUNT(*) AS movie_count FROM movies;
 
-Q: count movies
-A: {{"collection":"movies","operation":"count","filter":{{}}}}
+Q: Movies with Tom Hanks?
+A: SELECT * FROM movies WHERE ARRAY_CONTAINS(cast, 'Tom Hanks') LIMIT 10;
 
-Q: movies from 1990
-A: {{"collection":"movies","operation":"find","filter":{{"year":1990}}}}
+Q: Horror movies from 2020?
+A: SELECT * FROM movies WHERE ARRAY_CONTAINS(genres, 'Horror') AND year = 2020 LIMIT 10;
 
-Q: runtime of Larks on a String
-A: {{"collection":"movies","operation":"find","filter":{{"title":{{"$regex":"Larks on a String","$options":"i"}}}}}}
+{format_instructions}
 
-Q: tell me about Larks
-A: {{"collection":"movies","operation":"find","filter":{{"title":{{"$regex":"Larks","$options":"i"}}}}}}
+Question: {rewritten_question}"""
+    ).partial(format_instructions=sql_parser.get_format_instructions())
+    | model
+    | sql_parser
+)
 
-Q: {question}
-A:"""
+answer_chain = (
+    PromptTemplate.from_template(
+        """Answer the user's question using ONLY the database result.
 
-    try:
-        resp = llm.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Return ONLY valid JSON."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0,
-            max_tokens=300
-        )
+Original: {question}
+Rewritten: {rewritten_question}
+SQL: {sql_query}
+Result: {database_data}
 
-        content = resp.choices[0].message.content.strip()
-
-    except Exception as e:
-        return {
-            "text": "LLM request failed.",
-            "json": {
-                "status": "error",
-                "error": str(e)
-            }
-        }
-
-    content = re.sub(
-        r"```(?:json)?\s*|\s*```",
-        "",
-        content,
-        flags=re.IGNORECASE
-    ).strip()
-
-    try:
-        q = json.loads(content)
-
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-
-        if not match:
-            return {
-                "text": "Could not understand the query.",
-                "json": {
-                    "status": "error",
-                    "type": "invalid_json"
-                }
-            }
-
-        try:
-            q = json.loads(match.group())
-        except json.JSONDecodeError:
-            return {
-                "text": "Could not understand the query.",
-                "json": {
-                    "status": "error",
-                    "type": "invalid_json"
-                }
-            }
-
-    collection_name = q.get("collection")
-    operation = q.get("operation")
-    filt = q.get("filter", {})
-
-    if collection_name not in SCHEMA:
-        return {
-            "text": "Invalid collection.",
-            "json": {
-                "status": "error",
-                "type": "invalid_collection"
-            }
-        }
-
-    if operation not in {"count", "find"}:
-        return {
-            "text": "Invalid operation.",
-            "json": {
-                "status": "error",
-                "type": "invalid_operation"
-            }
-        }
-
-    collection = db[collection_name]
-
-    if operation == "count":
-
-        count = collection.count_documents(filt)
-
-        return {
-            "text": f"There are {count} {collection_name} matching your question.",
-            "json": {
-                "status": "success",
-                "type": "count",
-                "result": count,
-                "collection": collection_name,
-                "filter": filt
-            }
-        }
-
-    docs = list(
-        collection.find(
-            filt,
-            {
-                "_id": 0,
-                "password": 0
-            }
-        ).limit(10)
+Rules:
+- No invented information
+- Use only the result
+- If empty, say no data found
+- Be concise
+- No implementation details"""
     )
+    | model
+    | StrOutputParser()
+)
 
-    answer_prompt = f"""Answer the user's question using ONLY this database JSON.
+def get_sql_connection():
+    if not MONGODB_ODBC_CONNECTION_STRING:
+        raise RuntimeError("MONGODB_ODBC_CONNECTION_STRING not configured")
+    return pyodbc.connect(MONGODB_ODBC_CONNECTION_STRING)
 
-Question:
-{question}
+def validate_sql(query: str) -> str:
+    query = query.strip()
+    query = re.sub(r"```(?:sql)?", "", query, flags=re.IGNORECASE).replace("```", "").strip()
+    query = query.rstrip(";").strip()
+    
+    if not re.match(r"^SELECT\b", query, flags=re.IGNORECASE):
+        raise ValueError("Only SELECT queries allowed")
+    
+    for keyword in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "GRANT", "REVOKE"]:
+        if re.search(rf"\b{keyword}\b", query, flags=re.IGNORECASE):
+            raise ValueError(f"Forbidden operation: {keyword}")
+    
+    return query
 
-Database JSON:
-{json.dumps(docs, default=str, indent=2)}
-
-Do not invent information.
-If the data does not contain the answer, say that it is not available.
-Keep the answer concise.
-"""
-
+def execute_sql(query: str):
+    connection, cursor = None, None
     try:
-        answer_resp = llm.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Answer using only the provided database data."
-                },
-                {
-                    "role": "user",
-                    "content": answer_prompt
-                }
-            ],
-            temperature=0,
-            max_tokens=300
-        )
+        connection = get_sql_connection()
+        cursor = connection.cursor()
+        cursor.execute(query)
+        columns = [col[0] for col in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
 
-        answer = answer_resp.choices[0].message.content.strip()
-
+def query_db(question: str):
+    history = memory.load_memory_variables({}).get("history", "")
+    
+    try:
+        rewritten = rewrite_chain.invoke({
+            "question": question,
+            "history": history,
+            "schema": json.dumps(SCHEMA, indent=2)
+        }).strip()
+    except Exception as e:
+        return {"text": "Failed to rewrite question", "json": {"status": "error", "type": "rewrite_error", "error": str(e)}}
+    
+    try:
+        sql_query = sql_chain.invoke({
+            "rewritten_question": rewritten,
+            "schema": json.dumps(SCHEMA, indent=2)
+        }).query
+    except Exception as e:
+        return {"text": "Failed to generate SQL", "json": {"status": "error", "type": "sql_generation_error", "error": str(e)}}
+    
+    try:
+        sql_query = validate_sql(sql_query)
+    except Exception as e:
+        return {"text": "SQL query not allowed", "json": {"status": "error", "type": "invalid_sql", "sql_query": sql_query, "error": str(e)}}
+    
+    try:
+        result = execute_sql(sql_query)
+    except Exception as e:
+        return {"text": "Database query failed", "json": {"status": "error", "type": "database_error", "sql_query": sql_query, "error": str(e)}}
+    
+    try:
+        answer = answer_chain.invoke({
+            "question": question,
+            "rewritten_question": rewritten,
+            "sql_query": sql_query,
+            "database_data": json.dumps(result, indent=2, default=str)
+        }).strip()
     except Exception:
-        answer = (
-            f"No {collection_name} matched your question."
-            if not docs
-            else f"Found {len(docs)} {collection_name}."
-        )
-
+        answer = "No matching data found" if not result else f"Found {len(result)} result(s)"
+    
+    memory.save_context({"input": question}, {"output": answer})
+    
     return {
         "text": answer,
         "json": {
             "status": "success",
-            "type": "find",
-            "result": docs,
-            "count": len(docs),
-            "collection": collection_name,
-            "filter": filt
+            "type": "sql",
+            "original_question": question,
+            "rewritten_question": rewritten,
+            "sql_query": sql_query,
+            "result": result,
+            "count": len(result)
         }
     }
 
-
 if __name__ == "__main__":
-    question = input("Ask a question: ")
-    result = query_db(question)
-    print(json.dumps(result, indent=2, default=str))
+    while True:
+        question = input("\nAsk a question: ")
+        if question.lower() in {"exit", "quit"}:
+            break
+        print(json.dumps(query_db(question), indent=2, default=str))

@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from .main import query_db
@@ -21,37 +22,18 @@ class QueryRequest(BaseModel):
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-
     config = {
         "title": "text2db",
-        "subtitle": "Ask a question and get results from the database",
-        "placeholder": "e.g., count the number of movies",
+        "subtitle": "Conversational database queries powered by AI",
+        "placeholder": "Ask about movies, users, comments, sessions...",
         "db_name": os.getenv("MONGO_DB_NAME", "sample_mflix"),
-        "llm_model": os.getenv("LLM_MODEL", "local-model"),
-        "collections": [
-            "movies",
-            "users",
-            "comments",
-            "sessions",
-            "theaters"
-        ]
+        "llm_model": os.getenv("LLM_MODEL", "llama-3.1-8b-instant"),
     }
+    return templates.TemplateResponse(request, "index.html", {"request": request, **config})
 
-    return templates.TemplateResponse(
-        request,
-        "index.html",
-        {
-            "request": request,
-            **config
-        }
-    )
 
 @app.post("/api/query")
 async def api_query(data: QueryRequest):
-
     if not data.question.strip():
-        return {
-            "error": "No question provided"
-        }
-
+        return {"error": "No question provided"}
     return query_db(data.question)
